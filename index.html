@@ -145,6 +145,7 @@
         const hash = await walletClientL1.depositTransaction({
           ...depositArgs,
           account: address,
+          gas: 300000, // coba mulai 300k-500k
         });
 
         document.getElementById("status").innerHTML =
