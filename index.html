@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Giwa Bridge (Sepolia ↔ Giwa Sepolia)</title>
+  <script type="module">
+    import {
+      createPublicClient,
+      createWalletClient,
+      custom,
+      http,
+      formatEther,
+      parseEther,
+      defineChain
+    } from "https://esm.sh/viem@2.9.32";
+    import { publicActionsL1, publicActionsL2, walletActionsL1, walletActionsL2 } from "https://esm.sh/viem/op-stack";
+    import { sepolia } from "https://esm.sh/viem/chains";
+
+    // ======== Chain config ========
+    const giwaSepolia = defineChain({
+      id: 91342,
+      name: "Giwa Sepolia",
+      nativeCurrency: { name: "Sepolia Ether", symbol: "ETH", decimals: 18 },
+      rpcUrls: { default: { http: ["https://sepolia-rpc.giwa.io"] } },
+      contracts: {
+        multicall3: { address: "0xcA11bde05977b3631167028862bE2a173976CA11" },
+        l2OutputOracle: {},
+        disputeGameFactory: {
+          [sepolia.id]: { address: "0x37347caB2afaa49B776372279143D71ad1f354F6" },
+        },
+        portal: {
+          [sepolia.id]: { address: "0x956962C34687A954e611A83619ABaA37Ce6bC78A" },
+        },
+        l1StandardBridge: {
+          [sepolia.id]: { address: "0x77b2ffc0F57598cAe1DB76cb398059cF5d10A7E7" },
+        },
+      },
+      testnet: true,
+    });
+
+    const provider = window.ethereum;
+    let address = null;
+
+    // ======== Clients ========
+    const publicClientL1 = createPublicClient({
+      chain: sepolia,
+      transport: http("https://ethereum-sepolia-rpc.publicnode.com") // atau rpc Sepolia lain
+    }).extend(publicActionsL1());
+
+    const walletClientL1 = createWalletClient({
+      chain: sepolia,
+      transport: provider ? custom(provider) : http()
+    }).extend(walletActionsL1());
+
+    const publicClientL2 = createPublicClient({
+      chain: giwaSepolia,
+      transport: provider ? custom(provider) : http()
+    }).extend(publicActionsL2());
+
+    const walletClientL2 = createWalletClient({
+      chain: giwaSepolia,
+      transport: provider ? custom(provider) : http()
+    }).extend(walletActionsL2());
+
+    // ======== Functions ========
+    async function connect() {
+      if (!provider) {
+        alert("❌ MetaMask tidak terdeteksi!");
+        return;
+      }
+
+      const accounts = await provider.request({ method: "eth_requestAccounts" });
+      address = accounts[0];
+      document.getElementById("status").innerText = "✅ Wallet terhubung: " + address;
+
+      // Tambah Giwa Sepolia ke MetaMask otomatis
+      // await addGiwaChain();
+
+      await refreshBalances();
+    }
+
+    async function addGiwaChain() {
+      try {
+        const chainId = "0x" + giwaSepolia.id.toString(16);
+        await provider.request({
+          method: "wallet_addEthereumChain",
+          params: [{
+            chainId,
+            chainName: giwaSepolia.name,
+            nativeCurrency: giwaSepolia.nativeCurrency,
+            rpcUrls: giwaSepolia.rpcUrls.default.http,
+            blockExplorerUrls: ["https://explorer.giwa.io"]
+          }]
+        });
+      } catch (err) {
+        if (err.code !== 4001) console.error("Add chain error:", err);
+      }
+    }
+
+    async function refreshBalances() {
+      if (!address) return;
+      try {
+        const [b1] = await Promise.all([
+          publicClientL1.getBalance({ address })
+        ]);
+        document.getElementById("balL1").innerText = formatEther(b1) + " ETH";
+      } catch (e) {
+        document.getElementById("status").innerText = "❌ Gagal fetch balance: " + e.message;
+      }
+    }
+
+    async function ensureChain(chain) {
+      const currentChainId = await provider.request({ method: "eth_chainId" });
+      if (parseInt(currentChainId, 16) === chain.id) return;
+
+      try {
+        await provider.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: "0x" + chain.id.toString(16) }],
+        });
+      } catch (err) {
+        if (err.code === 4902) {
+          await addGiwaChain();
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    async function deposit() {
+      try {
+        if (!address) return alert("Hubungkan wallet dulu!");
+        await ensureChain(sepolia);
+
+        const amt = document.getElementById("amount").value || "0.001";
+        document.getElementById("status").innerText = "⏳ Menyiapkan deposit " + amt + " ETH...";
+
+        const depositArgs = await publicClientL2.buildDepositTransaction({
+          mint: parseEther(amt),
+          to: address,
+        });
+
+        const hash = await walletClientL1.depositTransaction({
+          ...depositArgs,
+          account: address,
+        });
+
+        document.getElementById("status").innerHTML =
+          `✅ Deposit Tx hash (L1): <a href="https://sepolia.etherscan.io/tx/${hash}" target="_blank">${hash}</a>`;
+        await refreshBalances();
+      } catch (e) {
+        document.getElementById("status").innerText = "❌ Error deposit: " + e.message;
+      }
+    }
+
+    async function withdraw() {
+      try {
+        if (!address) return alert("Hubungkan wallet dulu!");
+        await ensureChain(giwaSepolia);
+
+        const amt = document.getElementById("amount").value || "0.0001";
+
+        const balance = await publicClientL2.getBalance({ address });
+        if (balance < parseEther(amt)) {
+          alert("⚠️ Saldo L2 tidak cukup untuk withdraw!");
+          return;
+        }
+
+        document.getElementById("status").innerText = "⏳ Menyiapkan withdraw " + amt + " ETH...";
+
+        const withdrawalArgs = await publicClientL1.buildInitiateWithdrawal({
+          to: address,
+          value: parseEther(amt),
+        });
+
+        const hash = await walletClientL2.initiateWithdrawal({
+          ...withdrawalArgs,
+          account: address,
+        });
+
+        document.getElementById("status").innerText =
+          "✅ Withdraw Tx hash (L2): " + hash + " (butuh prove & finalize)";
+        await refreshBalances();
+      } catch (e) {
+        document.getElementById("status").innerText = "❌ Error withdraw: " + e.message;
+      }
+    }
+
+    window.connect = connect;
+    window.refreshBalances = refreshBalances;
+    window.deposit = deposit;
+    window.withdraw = withdraw;
+
+  </script>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      max-width: 600px;
+      margin: 20px auto;
+      background: linear-gradient(135deg, #f0f4ff, #fdfdfd);
+      color: #333;
+      padding: 10px;
+    }
+
+    h1 {
+      text-align: center;
+      font-size: 2rem;
+      margin-bottom: 5px;
+    }
+
+    p {
+      text-align: center;
+      margin-bottom: 20px;
+      color: #666;
+    }
+
+    button {
+      padding: 10px 18px;
+      margin: 6px 0;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      font-weight: bold;
+      background: #4f46e5;
+      color: white;
+      transition: all 0.25s ease;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+
+    button:hover {
+      background: #3730a3;
+      transform: translateY(-2px);
+      box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+    }
+
+    input {
+      padding: 10px;
+      width: 140px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      margin-bottom: 10px;
+      font-size: 1rem;
+    }
+
+    .card {
+      border: 1px solid #e5e7eb;
+      background: white;
+      padding: 18px;
+      border-radius: 14px;
+      margin-top: 14px;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+    }
+
+    #status {
+      margin-top: 8px;
+      padding: 10px;
+      border-radius: 8px;
+      background: #f9fafb;
+      font-size: 0.95rem;
+      word-break: break-all;
+    }
+
+    a {
+      color: #2563eb;
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+  </style>
+
+</head>
+
+<body>
+  <h1>🌉 Giwa Bridge</h1>
+  <p>Bridge ETH <b>Sepolia ↔ Giwa Sepolia</b></p>
+
+  <button onclick="connect()">🔗 Connect Wallet</button>
+  <div class="card">
+    <div>L1 (Sepolia): <span id="balL1">-</span></div>
+    <!-- <div>L2 (Giwa): <span id="balL2">-</span></div> -->
+  </div>
+
+  <div class="card">
+    <input id="amount" placeholder="0.001" /> ETH
+    <div>
+      <button onclick="deposit()">⬆️ Deposit → Giwa</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <b>Status:</b>
+    <div id="status">-</div>
+  </div>
+
+  <p style="margin-top:20px; font-size:14px; color:#555;">
+    <br>☕ Donate<br><br>
+    EVM 0x82732659D07F9c12F98985bC7A9Cf2A7F6CdEB86<br>
+    SOL 8tTHDg5PBmRM1MtQpxgrGpwAfh1mn4sTpGgrAVnm2V8w
+  </p>
+
+</body>
+
+</html>
